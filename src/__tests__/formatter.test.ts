@@ -47,8 +47,10 @@ describe("verdictBadge", () => {
 });
 
 describe("banner", () => {
-  it("includes the tool name", () => {
-    expect(banner()).toContain("curl-review");
+  it("includes the tool name and version", () => {
+    const result = banner("1.2.3");
+    expect(result).toContain("curl-review");
+    expect(result).toContain("1.2.3");
   });
 });
 

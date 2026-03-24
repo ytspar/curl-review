@@ -98,12 +98,12 @@ export function createTable(
 }
 
 // Banner
-export function banner(): string {
+export function banner(version: string): string {
+  const tag = c.dim(`v${version}`);
   const lines = [
     "",
-    c.cyan("  ┌─────────────────────────────────────┐"),
-    c.cyan("  │") + c.bold("   curl-review") + c.dim("  — safe script runner") + c.cyan("  │"),
-    c.cyan("  └─────────────────────────────────────┘"),
+    `  ${c.bold(c.cyan("curl-review"))} ${tag}`,
+    `  ${c.dim("Inspect scripts before they run")}`,
     "",
   ];
   return lines.join("\n");

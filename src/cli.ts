@@ -14,19 +14,12 @@ import { banner, c, createTable, formatBytes, noColor, sym, verdictBadge } from 
 const program = new Command()
   .name("curl-review")
   .description("Safely inspect and optionally execute curl|sh install scripts")
-  .version("0.3.1")
+  .version("0.3.2")
   .argument("<url>", "URL of the script to review")
   .option("-o, --original <command>", "Original intercepted command")
   .option("-e, --execute", "Non-interactive: review then execute")
   .option("-y, --yes", "Auto-execute only if verdict is SAFE")
   .action(main);
-
-// Only parse CLI args when run directly, not when imported as a module
-const __filename = fileURLToPath(import.meta.url);
-const entrypoint = process.argv[1] ? realpathSync(process.argv[1]) : "";
-if (entrypoint === realpathSync(__filename)) {
-  program.parse();
-}
 
 interface ReviewState {
   url: string;
@@ -82,7 +75,7 @@ async function main(
   url: string,
   opts: { original?: string; execute?: boolean; yes?: boolean }
 ) {
-  console.log(banner());
+  console.log(banner("0.3.2"));
 
   // Validate URL before doing anything
   try {
@@ -546,4 +539,11 @@ function checkClaude(): boolean {
   } catch {
     return false;
   }
+}
+
+// Only parse CLI args when run directly, not when imported as a module
+const __filename = fileURLToPath(import.meta.url);
+const entrypoint = process.argv[1] ? realpathSync(process.argv[1]) : "";
+if (entrypoint === realpathSync(__filename)) {
+  program.parse();
 }
