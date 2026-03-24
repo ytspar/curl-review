@@ -2,9 +2,10 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn as nodeSpawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { select, confirm, Separator } from "@inquirer/prompts";
 import ora from "ora";
@@ -13,7 +14,7 @@ import { banner, c, createTable, formatBytes, noColor, sym, verdictBadge } from 
 const program = new Command()
   .name("curl-review")
   .description("Safely inspect and optionally execute curl|sh install scripts")
-  .version("0.3.0")
+  .version("0.3.1")
   .argument("<url>", "URL of the script to review")
   .option("-o, --original <command>", "Original intercepted command")
   .option("-e, --execute", "Non-interactive: review then execute")
@@ -21,9 +22,9 @@ const program = new Command()
   .action(main);
 
 // Only parse CLI args when run directly, not when imported as a module
-const isDirectRun = process.argv[1] &&
-  (process.argv[1].endsWith("/cli.js") || process.argv[1].endsWith("/cli.ts"));
-if (isDirectRun) {
+const __filename = fileURLToPath(import.meta.url);
+const entrypoint = process.argv[1] ? realpathSync(process.argv[1]) : "";
+if (entrypoint === realpathSync(__filename)) {
   program.parse();
 }
 

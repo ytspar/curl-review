@@ -1,6 +1,6 @@
 {
   "name": "curl-review",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Safely inspect and optionally execute curl|sh install scripts",
   "type": "module",
   "main": "./dist/cli.js",
