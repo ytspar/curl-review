@@ -14,7 +14,7 @@ import { banner, c, createTable, formatBytes, noColor, sym, verdictBadge } from 
 const program = new Command()
   .name("curl-review")
   .description("Safely inspect and optionally execute curl|sh install scripts")
-  .version("0.3.2")
+  .version("0.3.3")
   .argument("<url>", "URL of the script to review")
   .option("-o, --original <command>", "Original intercepted command")
   .option("-e, --execute", "Non-interactive: review then execute")
@@ -75,7 +75,7 @@ async function main(
   url: string,
   opts: { original?: string; execute?: boolean; yes?: boolean }
 ) {
-  console.log(banner("0.3.2"));
+  console.log(banner("0.3.3"));
 
   // Validate URL before doing anything
   try {
@@ -473,34 +473,20 @@ function executeScript(state: ReviewState) {
 }
 
 function renderMarkdown(text: string): string {
-  // Prefer glow for full terminal markdown rendering
-  if (commandExists("glow")) {
-    const args = noColor ? ["-s", "notty", "-"] : ["-"];
-    const result = spawnSync("glow", args, {
-      input: text,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    if (result.status === 0 && result.stdout) {
-      return result.stdout;
-    }
-  }
-
-  // Lightweight fallback: headings, bold, code, bullets
   if (noColor) {
     return text
-      .replace(/^##? (.+)$/gm, "$1")
+      .replace(/^###? (.+)$/gm, "$1")
       .replace(/\*\*([^*]+)\*\*/g, "$1")
       .replace(/`([^`]+)`/g, "$1")
       .replace(/^- /gm, "  * ");
   }
 
   return text
-    .replace(/^## (.+)$/gm, `\x1b[1m\x1b[36m$1\x1b[0m`)
-    .replace(/^# (.+)$/gm, `\x1b[1m\x1b[35m$1\x1b[0m`)
-    .replace(/\*\*([^*]+)\*\*/g, `\x1b[1m$1\x1b[22m`)
-    .replace(/`([^`]+)`/g, `\x1b[33m$1\x1b[39m`)
-    .replace(/^- /gm, "  • ");
+    .replace(/^## (.+)$/gm, (_, h) => `\n${c.bold(c.cyan(h))}`)
+    .replace(/^# (.+)$/gm, (_, h) => `\n${c.bold(c.magenta(h))}`)
+    .replace(/\*\*([^*]+)\*\*/g, (_, t) => c.bold(t))
+    .replace(/`([^`]+)`/g, (_, t) => c.yellow(t))
+    .replace(/^- /gm, `  ${c.dim("•")} `);
 }
 
 export function extractShebang(script: string): string | null {
