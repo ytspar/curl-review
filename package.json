@@ -1,6 +1,6 @@
 {
   "name": "curl-review",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Safely inspect and optionally execute curl|sh install scripts",
   "type": "module",
   "main": "./dist/cli.js",
@@ -33,7 +33,9 @@
   },
   "dependencies": {
     "@inquirer/prompts": "^8.2.0",
-    "commander": "^14.0.0"
+    "cli-table3": "^0.6.5",
+    "commander": "^14.0.0",
+    "ora": "^9.3.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

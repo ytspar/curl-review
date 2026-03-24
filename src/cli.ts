@@ -2,13 +2,21 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { Command } from "commander";
-import { select, confirm } from "@inquirer/prompts";
-import { c, sym, box, formatBytes } from "./formatter.js";
+import { select, confirm, Separator } from "@inquirer/prompts";
+import ora from "ora";
+import {
+  c,
+  sym,
+  banner,
+  createTable,
+  formatBytes,
+  verdictBadge,
+} from "./formatter.js";
 
 const program = new Command()
   .name("curl-review")
   .description("Safely inspect and optionally execute curl|sh install scripts")
-  .version("0.1.0")
+  .version("0.2.0")
   .argument("<url>", "URL of the script to review")
   .option("-o, --original <command>", "Original intercepted command")
   .option("-e, --execute", "Non-interactive: review then execute")
@@ -28,11 +36,42 @@ interface ReviewState {
   verdict?: "SAFE" | "CAUTION" | "DANGEROUS";
 }
 
-async function main(url: string, opts: { original?: string; execute?: boolean }) {
-  const hasClaude = checkClaude();
-  const hasBat = commandExists("bat");
+async function main(
+  url: string,
+  opts: { original?: string; execute?: boolean }
+) {
+  // Banner
+  console.log(banner());
 
-  console.log(`\n${c.dim("Downloading")} ${url} ${c.dim("...")}`);
+  // Show intercepted command prominently
+  if (opts.original) {
+    console.log(
+      `  ${c.dim("Intercepted")} ${c.danger("⚠")} ${c.bold(opts.original)}`
+    );
+    console.log(`  ${c.dim("This command was blocked for your safety.")}`);
+    console.log("");
+  }
+
+  // Check tools with spinners
+  const toolSpinner = ora({
+    text: "Checking tools...",
+    color: "cyan",
+  }).start();
+
+  const hasBat = commandExists("bat");
+  const hasClaude = checkClaude();
+
+  const tools: string[] = [];
+  tools.push(hasBat ? `${sym.check} bat` : `${sym.cross} bat`);
+  tools.push(hasClaude ? `${sym.check} claude` : `${sym.cross} claude`);
+  toolSpinner.succeed(`Tools: ${tools.join("  ")}`);
+
+  // Download with spinner
+  const dlSpinner = ora({
+    text: `Downloading ${c.cyan(url)}`,
+    color: "cyan",
+  }).start();
+
   let script: string;
   try {
     script = execFileSync("curl", ["-fsSL", url], {
@@ -40,12 +79,30 @@ async function main(url: string, opts: { original?: string; execute?: boolean })
       timeout: 30000,
     });
   } catch {
-    console.error(`\n${sym.cross} ${c.red("Failed to download")} ${url}`);
+    dlSpinner.fail(`Failed to download ${url}`);
     process.exit(1);
   }
 
   const lines = script.split("\n").length;
   const bytes = Buffer.byteLength(script);
+  dlSpinner.succeed(`Downloaded ${c.bold(String(lines))} lines (${formatBytes(bytes)})`);
+  console.log("");
+
+  // Script info table
+  const table = createTable(["Property", "Value"]);
+  table.push(
+    [c.dim("URL"), url],
+    [c.dim("Size"), `${lines} lines (${formatBytes(bytes)})`],
+    [c.dim("Shebang"), extractShebang(script) || c.dim("none")],
+    [
+      c.dim("Claude"),
+      hasClaude
+        ? `${sym.check} authenticated`
+        : `${sym.cross} not available ${c.dim("— run: claude /login")}`,
+    ]
+  );
+  console.log(table.toString());
+  console.log("");
 
   const state: ReviewState = {
     url,
@@ -57,8 +114,6 @@ async function main(url: string, opts: { original?: string; execute?: boolean })
     hasBat,
     reviewed: false,
   };
-
-  displayHeader(state);
 
   if (opts.execute) {
     await runSecurityReview(state);
@@ -73,116 +128,148 @@ async function main(url: string, opts: { original?: string; execute?: boolean })
   await interactiveMenu(state);
 }
 
-function displayHeader(state: ReviewState) {
-  const infoLines: string[] = [];
-
-  if (state.original) {
-    infoLines.push(`${c.label("Intercepted")}  ${c.danger(state.original)}`);
-    infoLines.push("");
-  }
-
-  infoLines.push(`${c.label("URL")}          ${state.url}`);
-  infoLines.push(
-    `${c.label("Size")}         ${state.lines} lines (${formatBytes(state.bytes)})`
-  );
-
-  if (state.hasClaude) {
-    infoLines.push(`${c.label("Claude")}       ${sym.check} ready`);
-  } else {
-    infoLines.push(
-      `${c.label("Claude")}       ${sym.cross} unavailable ${c.dim("(run: claude /login)")}`
-    );
-  }
-
-  console.log("\n" + box("curl-review", infoLines));
-  console.log("");
-}
-
 async function interactiveMenu(state: ReviewState) {
   while (true) {
-    const choices: { value: string; name: string; description?: string }[] = [
-      {
-        value: "view",
-        name: `${sym.info} View script`,
-        description: `Syntax-highlighted view of ${state.lines} lines`,
-      },
-    ];
+    const choices: (
+      | { value: string; name: string; description?: string }
+      | Separator
+    )[] = [];
+
+    // ── Inspect section
+    choices.push(new Separator(c.dim("─── Inspect")));
+    choices.push({
+      value: "view",
+      name: `  ${sym.info} View script`,
+      description: state.hasBat
+        ? "Syntax-highlighted with bat"
+        : "View in less",
+    });
 
     if (state.hasClaude) {
       choices.push({
         value: "review",
         name: state.reviewed
-          ? `${sym.shield} Re-run security review`
-          : `${sym.shield} Security review`,
-        description: "AI-powered analysis for malicious patterns",
+          ? `  ${sym.shield} Re-run security review`
+          : `  ${sym.shield} Run security review`,
+        description: "AI-powered analysis via Claude",
+      });
+    } else {
+      choices.push({
+        value: "review_disabled",
+        name: c.dim(`  ${sym.shield} Security review (unavailable)`),
+        description: "Run: claude /login",
       });
     }
 
-    if (state.reviewed && state.verdict !== "DANGEROUS") {
+    // ── Action section
+    choices.push(new Separator(c.dim("─── Action")));
+
+    if (state.verdict === "DANGEROUS") {
       choices.push({
-        value: "execute",
-        name: `${c.green("▶")} Execute script`,
-        description: state.verdict === "SAFE"
-          ? "Script reviewed — no issues found"
-          : "Script reviewed — proceed with caution",
+        value: "execute_dangerous",
+        name: `  ${c.danger(sym.play)} Execute ${c.danger("(DANGEROUS)")}`,
+        description: "Script flagged dangerous — requires confirmation",
       });
-    } else if (!state.reviewed) {
+    } else if (state.reviewed) {
+      const badge =
+        state.verdict === "SAFE"
+          ? c.green(sym.play)
+          : c.yellow(sym.play);
       choices.push({
         value: "execute",
-        name: `${c.yellow("▶")} Execute script ${c.dim("(not yet reviewed)")}`,
+        name: `  ${badge} Execute script`,
+        description:
+          state.verdict === "SAFE"
+            ? "Reviewed — no issues found"
+            : "Reviewed — proceed with caution",
+      });
+    } else {
+      choices.push({
+        value: "execute_unreviewed",
+        name: `  ${c.yellow(sym.play)} Execute script ${c.dim("(not reviewed)")}`,
         description: "Run without security review",
       });
     }
 
+    choices.push(new Separator(c.dim("───")));
     choices.push({
       value: "cancel",
-      name: `${sym.cross} Cancel`,
+      name: `  ${sym.cross} Cancel`,
     });
 
     try {
       const action = await select({
-        message: "What would you like to do?",
+        message: state.reviewed
+          ? `Verdict: ${verdictBadge(state.verdict!)} — What next?`
+          : "What would you like to do?",
         choices,
-        pageSize: 10,
+        pageSize: 12,
+        loop: false,
       });
 
       switch (action) {
         case "view":
           viewScript(state);
           break;
+
         case "review":
           await runSecurityReview(state);
           break;
+
+        case "review_disabled":
+          console.log(
+            `\n${sym.cross} Claude not authenticated. Run: ${c.bold("claude /login")}\n`
+          );
+          break;
+
         case "execute":
-          if (!state.reviewed) {
-            const skip = await confirm({
-              message: `${c.yellow("Script has not been reviewed.")} Execute anyway?`,
-              default: false,
-            });
-            if (!skip) break;
-          }
           await executeScript(state);
           return;
+
+        case "execute_unreviewed": {
+          const skip = await confirm({
+            message: `${c.warn("Script has not been reviewed.")} Execute anyway?`,
+            default: false,
+          });
+          if (skip) {
+            await executeScript(state);
+            return;
+          }
+          break;
+        }
+
+        case "execute_dangerous": {
+          const force = await confirm({
+            message: `${c.danger("Script was flagged DANGEROUS.")} Are you absolutely sure?`,
+            default: false,
+          });
+          if (force) {
+            await executeScript(state);
+            return;
+          }
+          break;
+        }
+
         case "cancel":
-          console.log(`\n${c.dim("Cancelled.")}`);
+          console.log(`\n${c.dim("Cancelled.")}\n`);
           process.exit(0);
       }
     } catch {
-      // Ctrl+C
-      console.log(`\n${c.dim("Cancelled.")}`);
+      console.log(`\n${c.dim("Cancelled.")}\n`);
       process.exit(0);
     }
   }
 }
 
 function viewScript(state: ReviewState) {
+  console.log("");
   if (state.hasBat) {
     spawnSync(
       "bat",
       [
         "--language=sh",
         "--paging=always",
-        "--style=numbers,header",
+        "--style=numbers,header,grid",
         `--file-name=${state.url}`,
       ],
       {
@@ -196,19 +283,22 @@ function viewScript(state: ReviewState) {
       stdio: ["pipe", "inherit", "inherit"],
     });
   }
+  console.log("");
 }
 
 async function runSecurityReview(state: ReviewState) {
   if (!state.hasClaude) {
     console.log(
-      `\n${sym.cross} Claude not authenticated. Run: ${c.bold("claude /login")}`
+      `\n${sym.cross} Claude not authenticated. Run: ${c.bold("claude /login")}\n`
     );
     return;
   }
 
-  console.log(
-    `\n${sym.shield} ${c.cyan("Analyzing")} ${state.lines} lines from ${c.dim(state.url)}...\n`
-  );
+  console.log("");
+  const spinner = ora({
+    text: `Analyzing ${c.bold(String(state.lines))} lines from ${c.dim(state.url)}`,
+    color: "cyan",
+  }).start();
 
   const prompt = `You are a shell script security reviewer. Analyze this script downloaded from: ${state.url}
 
@@ -236,7 +326,7 @@ Be concise. Structure as:
   });
 
   if (child.status !== 0) {
-    console.log(`\n${sym.cross} ${c.red("Security review failed")}`);
+    spinner.fail("Security review failed");
     return;
   }
 
@@ -244,40 +334,31 @@ Be concise. Structure as:
   const output = child.stdout ?? "";
   if (/\bDANGEROUS\b/i.test(output)) {
     state.verdict = "DANGEROUS";
-    console.log(`\n${c.danger("⚠  DANGEROUS")} — review the findings above carefully.`);
+    spinner.fail(`Verdict: ${verdictBadge("DANGEROUS")}`);
   } else if (/\bCAUTION\b/i.test(output)) {
     state.verdict = "CAUTION";
-    console.log(`\n${c.yellow("⚠  CAUTION")} — review the findings above before proceeding.`);
+    spinner.warn(`Verdict: ${verdictBadge("CAUTION")}`);
   } else if (/\bSAFE\b/i.test(output)) {
     state.verdict = "SAFE";
-    console.log(`\n${sym.check} ${c.green("SAFE")} — no issues detected.`);
+    spinner.succeed(`Verdict: ${verdictBadge("SAFE")}`);
+  } else {
+    spinner.info("Review complete — no clear verdict parsed");
   }
   console.log("");
 }
 
 async function executeScript(state: ReviewState) {
-  if (state.verdict === "DANGEROUS") {
-    try {
-      const force = await confirm({
-        message: `${c.danger("Script was flagged DANGEROUS.")} Are you absolutely sure?`,
-        default: false,
-      });
-      if (!force) {
-        console.log(`\n${c.dim("Aborted.")}`);
-        return;
-      }
-    } catch {
-      console.log(`\n${c.dim("Aborted.")}`);
-      return;
-    }
-  }
-
-  console.log(`\n${c.green("▶ Executing")} ${c.dim(state.url)}...\n`);
+  console.log(`\n${c.green(`${sym.play} Executing`)} ${c.dim(state.url)}...\n`);
   const child = spawnSync("sh", [], {
     input: state.script,
     stdio: ["pipe", "inherit", "inherit"],
   });
   process.exit(child.status ?? 1);
+}
+
+function extractShebang(script: string): string | null {
+  const first = script.split("\n")[0];
+  return first?.startsWith("#!") ? first : null;
 }
 
 function commandExists(cmd: string): boolean {

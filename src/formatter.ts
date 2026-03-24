@@ -1,4 +1,6 @@
 // ANSI color helpers
+import Table from "cli-table3";
+
 const codes = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
@@ -32,7 +34,8 @@ export const c = {
   yellow: (s: string) => colorize(s, "yellow"),
   blue: (s: string) => colorize(s, "blue"),
   cyan: (s: string) => colorize(s, "cyan"),
-  gray: (s: string) => colorize(s, "dim"),
+  magenta: (s: string) => colorize(s, "magenta"),
+  gray: (s: string) => colorize(s, "gray"),
   danger: (s: string) => colorize(s, "red", "bold"),
   success: (s: string) => colorize(s, "green"),
   warn: (s: string) => colorize(s, "yellow"),
@@ -51,7 +54,71 @@ export const sym = {
   bullet: c.dim("•"),
   shield: "🛡️",
   lock: "🔒",
+  play: "▶",
 };
+
+// Table with box-drawing characters (same style as hetzner-cli)
+export function createTable(
+  head: string[],
+  colWidths?: number[]
+): Table.Table {
+  const options: Table.TableConstructorOptions = {
+    head: head.map((h) => colorize(h, "cyan")),
+    chars: {
+      top: "─",
+      "top-mid": "┬",
+      "top-left": "┌",
+      "top-right": "┐",
+      bottom: "─",
+      "bottom-mid": "┴",
+      "bottom-left": "└",
+      "bottom-right": "┘",
+      left: "│",
+      "left-mid": "├",
+      mid: "─",
+      "mid-mid": "┼",
+      right: "│",
+      "right-mid": "┤",
+      middle: "│",
+    },
+    style: {
+      "padding-left": 1,
+      "padding-right": 1,
+    },
+  };
+
+  if (colWidths) {
+    options.colWidths = colWidths;
+  }
+
+  return new Table(options);
+}
+
+// Banner
+export function banner(): string {
+  const lines = [
+    "",
+    c.cyan("  ┌─────────────────────────────────────┐"),
+    c.cyan("  │") + c.bold("   curl-review") + c.dim("  — safe script runner") + c.cyan("  │"),
+    c.cyan("  └─────────────────────────────────────┘"),
+    "",
+  ];
+  return lines.join("\n");
+}
+
+// Verdict badge
+export function verdictBadge(
+  verdict: "SAFE" | "CAUTION" | "DANGEROUS"
+): string {
+  switch (verdict) {
+    case "SAFE":
+      return `${colorize(" SAFE ", "bold", "bgGreen", "white")}`;
+    case "CAUTION":
+      return `${colorize(" CAUTION ", "bold", "bgYellow", "white")}`;
+    case "DANGEROUS":
+      return `${colorize(" DANGEROUS ", "bold", "bgRed", "white")}`;
+  }
+}
 
 // Box drawing
 export function box(
@@ -63,7 +130,11 @@ export function box(
   const hr = "─".repeat(width - 2);
   const out: string[] = [];
 
-  out.push(c.dim(`┌─ ${c.heading(title)} ${"─".repeat(Math.max(0, width - title.length - 5))}┐`));
+  out.push(
+    c.dim(
+      `┌─ ${c.heading(title)} ${"─".repeat(Math.max(0, width - title.length - 5))}┐`
+    )
+  );
 
   for (const line of lines) {
     out.push(`${c.dim("│")}  ${line}`);
@@ -83,7 +154,9 @@ export function heading(text: string): string {
 }
 
 export function formatBytes(bytes: number): string {
-  if (bytes > 1048576) return `${(bytes / 1048576).toFixed(1)}MB`;
-  if (bytes > 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${bytes}B`;
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${Number.parseFloat((bytes / k ** i).toFixed(1))} ${sizes[i]}`;
 }
