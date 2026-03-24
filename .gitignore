@@ -1,0 +1,16 @@
+node_modules/
+dist/
+
+# Sensitive files
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+
+# OS / Editor
+.DS_Store
+*.log
+coverage/
+.idea/
+.vscode/settings.json
