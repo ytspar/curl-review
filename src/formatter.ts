@@ -1,6 +1,8 @@
 // ANSI color helpers
 import Table from "cli-table3";
 
+export const noColor = "NO_COLOR" in process.env;
+
 const codes = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
@@ -22,6 +24,7 @@ const codes = {
 type Color = keyof typeof codes;
 
 export function colorize(text: string, ...colors: Color[]): string {
+  if (noColor) return text;
   const prefix = colors.map((c) => codes[c]).join("");
   return `${prefix}${text}${codes.reset}`;
 }
@@ -59,11 +62,11 @@ export const sym = {
 
 // Table with box-drawing characters (same style as hetzner-cli)
 export function createTable(
-  head: string[],
+  head?: string[],
   colWidths?: number[]
 ): Table.Table {
   const options: Table.TableConstructorOptions = {
-    head: head.map((h) => colorize(h, "cyan")),
+    ...(head && head.length > 0 ? { head: head.map((h) => colorize(h, "cyan")) } : {}),
     chars: {
       top: "─",
       "top-mid": "┬",
@@ -112,45 +115,12 @@ export function verdictBadge(
 ): string {
   switch (verdict) {
     case "SAFE":
-      return `${colorize(" SAFE ", "bold", "bgGreen", "white")}`;
+      return colorize(" SAFE ", "bold", "green");
     case "CAUTION":
-      return `${colorize(" CAUTION ", "bold", "bgYellow", "white")}`;
+      return colorize(" CAUTION ", "bold", "yellow");
     case "DANGEROUS":
-      return `${colorize(" DANGEROUS ", "bold", "bgRed", "white")}`;
+      return colorize(" DANGEROUS ", "bold", "red");
   }
-}
-
-// Box drawing
-export function box(
-  title: string,
-  lines: string[],
-  footer?: string
-): string {
-  const width = 60;
-  const hr = "─".repeat(width - 2);
-  const out: string[] = [];
-
-  out.push(
-    c.dim(
-      `┌─ ${c.heading(title)} ${"─".repeat(Math.max(0, width - title.length - 5))}┐`
-    )
-  );
-
-  for (const line of lines) {
-    out.push(`${c.dim("│")}  ${line}`);
-  }
-
-  if (footer) {
-    out.push(c.dim(`├${hr}┤`));
-    out.push(`${c.dim("│")}  ${footer}`);
-  }
-
-  out.push(c.dim(`└${hr}┘`));
-  return out.join("\n");
-}
-
-export function heading(text: string): string {
-  return `\n${c.heading(text)}\n${c.dim("─".repeat(text.length))}`;
 }
 
 export function formatBytes(bytes: number): string {

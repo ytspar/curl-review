@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatBytes, colorize, box, heading, verdictBadge, banner } from "../formatter.js";
+import { formatBytes, colorize, verdictBadge, banner, createTable, noColor, c, sym } from "../formatter.js";
 
 describe("formatBytes", () => {
   it("returns 0 B for zero", () => {
@@ -38,44 +38,6 @@ describe("colorize", () => {
   });
 });
 
-describe("box", () => {
-  it("returns a string with box-drawing characters", () => {
-    const result = box("Title", ["line1", "line2"]);
-    const lines = result.split("\n");
-
-    expect(lines.length).toBe(4); // top + 2 content + bottom
-    expect(result).toContain("Title");
-    expect(result).toContain("line1");
-    expect(result).toContain("line2");
-  });
-
-  it("includes footer when provided", () => {
-    const result = box("Title", ["content"], "footer text");
-    expect(result).toContain("footer text");
-    const lines = result.split("\n");
-    expect(lines.length).toBe(5);
-  });
-
-  it("handles empty lines array", () => {
-    const result = box("Title", []);
-    const lines = result.split("\n");
-    expect(lines.length).toBe(2); // top + bottom only
-  });
-});
-
-describe("heading", () => {
-  it("returns text with underline", () => {
-    const result = heading("Test");
-    expect(result).toContain("Test");
-    expect(result).toContain("─".repeat(4));
-  });
-
-  it("starts with a newline", () => {
-    const result = heading("Hello");
-    expect(result.startsWith("\n")).toBe(true);
-  });
-});
-
 describe("verdictBadge", () => {
   it("returns styled badge for each verdict", () => {
     expect(verdictBadge("SAFE")).toContain("SAFE");
@@ -87,5 +49,62 @@ describe("verdictBadge", () => {
 describe("banner", () => {
   it("includes the tool name", () => {
     expect(banner()).toContain("curl-review");
+  });
+});
+
+describe("createTable", () => {
+  it("returns a table object with push and toString", () => {
+    const table = createTable();
+    table.push(["Key", "Value"]);
+    const output = table.toString();
+    expect(output).toContain("Key");
+    expect(output).toContain("Value");
+  });
+
+  it("accepts custom column widths", () => {
+    const table = createTable(undefined, [10, 20]);
+    table.push(["A", "B"]);
+    expect(table.toString()).toContain("A");
+  });
+
+  it("accepts header row", () => {
+    const table = createTable(["Name", "Score"]);
+    table.push(["Alice", "100"]);
+    const output = table.toString();
+    expect(output).toContain("Name");
+    expect(output).toContain("Alice");
+  });
+});
+
+describe("noColor", () => {
+  it("is a boolean", () => {
+    expect(typeof noColor).toBe("boolean");
+  });
+});
+
+describe("c (color helpers)", () => {
+  it("has expected color methods", () => {
+    expect(typeof c.red).toBe("function");
+    expect(typeof c.green).toBe("function");
+    expect(typeof c.yellow).toBe("function");
+    expect(typeof c.cyan).toBe("function");
+    expect(typeof c.dim).toBe("function");
+    expect(typeof c.bold).toBe("function");
+  });
+
+  it("wraps text with color codes", () => {
+    const result = c.red("error");
+    expect(result).toContain("error");
+  });
+});
+
+describe("sym (symbols)", () => {
+  it("has expected symbol properties", () => {
+    expect(typeof sym.check).toBe("string");
+    expect(typeof sym.cross).toBe("string");
+    expect(typeof sym.shield).toBe("string");
+    expect(typeof sym.play).toBe("string");
+    expect(typeof sym.arrow).toBe("string");
+    expect(typeof sym.info).toBe("string");
   });
 });

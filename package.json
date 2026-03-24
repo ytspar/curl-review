@@ -29,6 +29,7 @@
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "prepublishOnly": "npm run typecheck && npm run build"
   },
   "dependencies": {
@@ -39,6 +40,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^4.1.1",
     "typescript": "^5.7.0",
     "vitest": "^3.1.1"
   },
@@ -49,5 +51,6 @@
     "type": "git",
     "url": "git+https://github.com/ytspar/curl-review.git"
   },
+  "sideEffects": false,
   "license": "MIT"
 }

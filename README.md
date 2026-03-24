@@ -115,6 +115,7 @@ fi
 ## Optional Dependencies
 
 - [`bat`](https://github.com/sharkdp/bat) — syntax highlighting (falls back to `less`)
+- [`glow`](https://github.com/charmbracelet/glow) — terminal markdown rendering for security review output (falls back to basic ANSI formatting)
 - [`claude`](https://claude.ai/claude-code) — AI security review (run `claude /login` to authenticate)
 
 ## License

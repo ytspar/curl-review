@@ -7,6 +7,9 @@ dist/
 *.pem
 *.key
 credentials.json
+.npmrc
+
+.product-finalizer-skip.json
 
 # OS / Editor
 .DS_Store
