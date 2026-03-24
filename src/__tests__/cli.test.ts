@@ -12,7 +12,7 @@ describe("CLI", () => {
     const output = execFileSync("node", [cliPath, "--version"], {
       encoding: "utf-8",
     });
-    expect(output.trim()).toBe("0.2.0");
+    expect(output.trim()).toBe("0.3.0");
   });
 
   it("prints help with --help flag", () => {

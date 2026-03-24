@@ -13,7 +13,7 @@ import { banner, c, createTable, formatBytes, noColor, sym, verdictBadge } from 
 const program = new Command()
   .name("curl-review")
   .description("Safely inspect and optionally execute curl|sh install scripts")
-  .version("0.2.0")
+  .version("0.3.0")
   .argument("<url>", "URL of the script to review")
   .option("-o, --original <command>", "Original intercepted command")
   .option("-e, --execute", "Non-interactive: review then execute")
