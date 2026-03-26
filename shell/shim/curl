@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# curl-review shim — sits in PATH before the real curl.
+# Detects install-style invocations (silent flags + piped output)
+# and redirects them through curl-review.
+#
+# Install:
+#   mkdir -p ~/.local/lib/curl-review
+#   cp this-file ~/.local/lib/curl-review/curl
+#   chmod +x ~/.local/lib/curl-review/curl
+#   # Add to PATH *before* the real curl (e.g. in .bashrc/.zshrc):
+#   export PATH="$HOME/.local/lib/curl-review:$PATH"
+
+# Find the real curl (skip this shim)
+_curl_review_find_real_curl() {
+  local self
+  # Use realpath to resolve symlinks so the shim reliably skips itself
+  if command -v realpath &>/dev/null; then
+    self="$(realpath "$0")"
+  else
+    self="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
+  fi
+  local found
+  while IFS= read -r found; do
+    local resolved="$found"
+    if command -v realpath &>/dev/null; then
+      resolved="$(realpath "$found" 2>/dev/null)" || resolved="$found"
+    fi
+    [[ "$resolved" != "$self" ]] && { echo "$found"; return; }
+  done < <(which -a curl 2>/dev/null)
+  # Last resort: common paths
+  for p in /usr/bin/curl /usr/local/bin/curl /opt/homebrew/bin/curl; do
+    [[ -x "$p" ]] && { echo "$p"; return; }
+  done
+  echo "curl-review shim: cannot find real curl" >&2
+  return 1
+}
+
+_CURL_REVIEW_REAL_CURL="$(_curl_review_find_real_curl)" || exit 1
+
+# Check if the flags look like a silent download (install pattern).
+# Matches combined flags containing s (silent) and either L (follow) or S (show-error),
+# which is the hallmark of curl-pipe-to-shell one-liners.
+_curl_review_has_install_flags() {
+  local has_s=false has_L=false has_f=false
+  for arg in "$@"; do
+    case "$arg" in
+      --silent)  has_s=true ;;
+      --location) has_L=true ;;
+      --fail)    has_f=true ;;
+      -*)
+        local flags="${arg#-}"
+        # Skip long options (other than the ones above)
+        [[ "$flags" = -* ]] && continue
+        [[ "$flags" = *s* ]] && has_s=true
+        [[ "$flags" = *L* ]] && has_L=true
+        [[ "$flags" = *f* ]] && has_f=true
+        ;;
+    esac
+  done
+  # Require all three: -f (fail), -s (silent), -L (follow redirects)
+  # This combination is the hallmark of install one-liners (curl -fsSL)
+  # and avoids false positives on curl -sSL used for API calls
+  $has_s && $has_L && $has_f
+}
+
+# Check if any arg writes output to a file (-o, --output, -O)
+_curl_review_writes_to_file() {
+  for arg in "$@"; do
+    case "$arg" in
+      -o|--output|-O|--remote-name) return 0 ;;
+      -o*) return 0 ;;  # -ofilename (no space)
+    esac
+  done
+  return 1
+}
+
+# Extract the URL (first non-flag argument)
+_curl_review_extract_url() {
+  for arg in "$@"; do
+    case "$arg" in
+      -*) continue ;;
+      http://*|https://*) echo "$arg"; return ;;
+    esac
+  done
+}
+
+# Bypass the shim entirely when CURL_REVIEW_BYPASS is set (prevents loops)
+if [[ -n "${CURL_REVIEW_BYPASS:-}" ]]; then
+  exec "$_CURL_REVIEW_REAL_CURL" "$@"
+fi
+
+# Only intercept when:
+# 1. stdout is a pipe (not a terminal, not a regular file from shell redirection)
+# 2. Has silent-download flags (-fsSL pattern)
+# 3. NOT writing to a file (-o, -O)
+# 4. curl-review is available
+_curl_review_stdout_is_pipe() {
+  [[ ! -t 1 ]] || return 1        # not a terminal
+  [[ -p /dev/stdout ]] && return 0 # explicitly a pipe
+  # Fallback: check via stat if /dev/stdout is a FIFO/pipe (macOS compat)
+  local mode
+  mode=$(stat -f '%p' /dev/stdout 2>/dev/null || stat -c '%F' /dev/stdout 2>/dev/null) || return 1
+  [[ "$mode" = *fifo* || "$mode" = *pipe* ]]
+}
+if _curl_review_stdout_is_pipe \
+   && _curl_review_has_install_flags "$@" \
+   && ! _curl_review_writes_to_file "$@" \
+   && command -v curl-review &>/dev/null; then
+
+  url="$(_curl_review_extract_url "$@")"
+  if [[ -n "$url" ]]; then
+    # Reconstruct the original command for display
+    original="curl $(printf '%q ' "$@")"
+    echo "" >&2
+    echo "curl-review: intercepted install command" >&2
+    echo "  original: $original" >&2
+    echo "  run 'curl-review $url' to inspect before executing" >&2
+    echo "" >&2
+    echo "  to bypass: CURL_REVIEW_BYPASS=1 $original | ..." >&2
+    echo "" >&2
+    exit 1
+  fi
+fi
+
+exec "$_CURL_REVIEW_REAL_CURL" "$@"

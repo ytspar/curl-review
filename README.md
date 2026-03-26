@@ -19,13 +19,63 @@ npm install && npm run build
 npm link
 ```
 
+## Shell Integration (recommended)
+
+The setup script installs two layers of protection:
+
+```bash
+# After npm install -g:
+bash "$(npm root -g)/curl-review/setup.sh"
+
+# Or from a local clone:
+bash setup.sh
+```
+
+### Interactive hook (zsh, bash, fish)
+
+Intercepts the Enter key in your interactive shell. When you type a command that pipes `curl` or `wget` into a shell for execution, the hook rewrites it to `curl-review <url>` before it runs. You see the rewritten command and press Enter again to confirm.
+
+Detected patterns:
+- `curl -fsSL https://example.com/install.sh | bash`
+- `bash <(curl -fsSL https://example.com/install.sh)`
+- `wget -qO- https://example.com/setup | sh`
+- `bash -c "$(curl -fsSL https://example.com/install.sh)"`
+
+Only commands that pipe downloads into a shell (`sh`, `bash`, `zsh`) are intercepted. Plain `curl` or `wget` usage (API calls, file downloads with `-o`, etc.) is never affected.
+
+### PATH shim (non-interactive)
+
+A `curl` wrapper placed in `~/.local/lib/curl-review/` before the real `curl` in your `PATH`. It catches non-interactive install patterns — when `curl` is called with silent-download flags (`-sSL`, `-fsSL`) and stdout is not a terminal (i.e. piped to a shell). The shim blocks the download and prints instructions to use `curl-review` instead.
+
+Set `CURL_REVIEW_BYPASS=1` to skip the shim when needed.
+
+### Manual setup
+
+To configure either layer by hand instead of using `setup.sh`:
+
+```bash
+# Interactive hook — zsh (add to .zshrc):
+source "$(npm root -g)/curl-review/shell/hook.zsh"
+
+# Interactive hook — bash (add to .bashrc):
+source "$(npm root -g)/curl-review/shell/hook.bash"
+
+# Interactive hook — fish (copy to conf.d):
+cp "$(npm root -g)/curl-review/shell/hook.fish" ~/.config/fish/conf.d/curl-review.fish
+
+# PATH shim (add to shell rc, before other PATH entries):
+export PATH="$HOME/.local/lib/curl-review:$PATH"
+cp "$(npm root -g)/curl-review/shell/shim/curl" ~/.local/lib/curl-review/curl
+chmod +x ~/.local/lib/curl-review/curl
+```
+
 ## Usage
 
 ```bash
 curl-review https://example.com/install.sh
 ```
 
-With the original intercepted command (used by tirith integration):
+With the original intercepted command (shown in the banner for context):
 
 ```bash
 curl-review https://example.com/install.sh --original "curl -fsSL https://example.com/install.sh | sh"
@@ -67,50 +117,6 @@ After a security review, the verdict updates the menu:
 - **SAFE** — execute option shows "no issues found"
 - **CAUTION** — execute option shows "proceed with caution"
 - **DANGEROUS** — execute is blocked unless explicitly confirmed
-
-## Tirith Integration
-
-`curl-review` integrates with [tirith](https://github.com/nichochar/tirith) terminal security guard. When tirith blocks a `curl | sh` paste, the zsh hook rewrites the command to `curl-review` automatically.
-
-Add this to your `.zshrc` after tirith initialization:
-
-```zsh
-if (( $+functions[_tirith_bracketed_paste] )); then
-  _tirith_bracketed_paste() {
-    local old_buffer="$BUFFER" old_cursor="$CURSOR"
-    zle _tirith_original_bracketed_paste 2>/dev/null || zle .bracketed-paste
-    [[ "${TIRITH:-}" == "0" ]] && return
-
-    local new_buffer="$BUFFER"
-    local pasted="${new_buffer:$old_cursor:$((${#new_buffer} - ${#old_buffer}))}"
-    [[ -z "$pasted" ]] && return
-
-    local tmpfile=$(mktemp)
-    echo -n "$pasted" | command tirith paste --shell posix >"$tmpfile" 2>&1
-    local rc=$?
-    local output=$(<"$tmpfile")
-    command rm -f "$tmpfile"
-
-    if [[ $rc -eq 1 ]]; then
-      local url
-      url=$(echo "$pasted" | grep -oE 'https?://[^ |]+')
-      if [[ -n "$url" ]]; then
-        BUFFER="${old_buffer}curl-review ${(q)url} --original ${(q)pasted}"
-        CURSOR=${#BUFFER}
-        return
-      fi
-      BUFFER="$old_buffer"
-      CURSOR=$old_cursor
-      _tirith_output ""
-      _tirith_output "paste> $pasted"
-      [[ -n "$output" ]] && _tirith_output "$output"
-      zle send-break
-    elif [[ $rc -eq 2 ]]; then
-      [[ -n "$output" ]] && { _tirith_output ""; _tirith_output "$output"; }
-    fi
-  }
-fi
-```
 
 ## Optional Dependencies
 

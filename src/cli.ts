@@ -90,8 +90,10 @@ async function main(
   }
 
   if (opts.original) {
-    console.log(`  ${c.dim("Intercepted:")} ${c.bold(opts.original)}`);
-    console.log(`  ${c.dim("Blocked by tirith — redirected to curl-review")}`);
+    // Strip ANSI escape sequences and control characters to prevent terminal injection
+    const safeOriginal = opts.original.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/[\x00-\x1f\x7f]/g, "");
+    console.log(`  ${c.dim("Intercepted:")} ${c.bold(safeOriginal)}`);
+    console.log(`  ${c.dim("Redirected to curl-review for inspection")}`);
     blankLine();
   }
 
@@ -464,8 +466,24 @@ Write exactly one of: SAFE, CAUTION, or DANGEROUS (the word alone, not bold, not
 }
 
 function executeScript(state: ReviewState) {
-  console.log(`\n${c.dim("Executing")} ${state.url}\n`);
-  const child = spawnSync("sh", [], {
+  const shebang = extractShebang(state.script);
+  let shell = "sh";
+  let shellArgs: string[] = [];
+  if (shebang) {
+    // Extract interpreter + flags from shebang
+    // e.g. #!/usr/bin/env bash -e → shell=bash, shellArgs=["-e"]
+    //      #!/bin/bash -e         → shell=/bin/bash, shellArgs=["-e"]
+    const parts = shebang.replace(/^#!\s*/, "").split(/\s+/);
+    if (parts[0] === "/usr/bin/env" && parts[1]) {
+      shell = parts[1];
+      shellArgs = parts.slice(2);
+    } else if (parts[0]) {
+      shell = parts[0];
+      shellArgs = parts.slice(1);
+    }
+  }
+  console.log(`\n${c.dim("Executing via")} ${[shell, ...shellArgs].join(" ")} ${c.dim("—")} ${state.url}\n`);
+  const child = spawnSync(shell, shellArgs, {
     input: state.script,
     stdio: ["pipe", "inherit", "inherit"],
   });
