@@ -58,6 +58,10 @@ jobs:
         if: steps.version.outputs.publish == 'true'
         run: npm ci
 
+      - name: Build
+        if: steps.version.outputs.publish == 'true'
+        run: npm run build --if-present
+
       - name: Test
         if: steps.version.outputs.publish == 'true'
         run: npm test
