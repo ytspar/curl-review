@@ -1,3 +1,11 @@
+# DO NOT RENAME THIS FILE.
+#
+# npm trusted publishing authorises by the workflow's path, so the trusted
+# publisher configured for this package names `.github/workflows/publish.yml`
+# exactly. Renaming it makes the OIDC subject stop matching and `npm publish`
+# fails with a bare "404 Not Found - PUT" -- npm reports a mismatched publisher
+# as 404 rather than 403, so it reads like the package is missing. If this file
+# must move, update the trusted publisher on npmjs.com in the same change.
 name: ci
 
 on:
