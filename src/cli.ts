@@ -28,7 +28,7 @@ import {
 const program = new Command()
   .name("curl-review")
   .description("Safely inspect and optionally execute curl|sh install scripts")
-  .version("0.4.0")
+  .version("0.4.1")
   // The program takes both a <url> argument and a `doctor` subcommand. Without
   // this, commander binds options appearing after `doctor` to the root command,
   // so `doctor --provider x` silently checked every provider instead.
@@ -65,11 +65,14 @@ program
  * that merely looks configured. Exits 0 if any reviewer answered.
  */
 async function runDoctor(opts: { provider?: string; debug?: boolean }) {
-  console.log(banner("0.4.0"));
+  console.log(banner("0.4.1"));
 
   const order = resolveProviderOrder(opts.provider);
-  // A health probe should not sit for the full review timeout per provider.
-  const timeoutMs = Math.min(resolveTimeoutMs(), 60_000);
+  // A health probe shouldn't sit for the full review timeout, but the cap still
+  // needs slack: these CLIs answer this one-word prompt in 4-30s normally and
+  // have been seen to take over a minute just to start on a loaded machine.
+  // Reporting a working reviewer as timed out is worse than waiting.
+  const timeoutMs = Math.min(resolveTimeoutMs(), 120_000);
   const spinner = ora(`Checking ${order.length} reviewer(s)`).start();
   const results = await checkProviderHealth(order, timeoutMs);
   spinner.stop();
@@ -215,7 +218,7 @@ async function main(
     debug?: boolean;
   }
 ) {
-  console.log(banner("0.4.0"));
+  console.log(banner("0.4.1"));
 
   // Validate URL before doing anything
   try {
