@@ -1,25 +1,136 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { execFileSync, spawn as nodeSpawn, spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { select, confirm, Separator } from "@inquirer/prompts";
 import ora from "ora";
 import { banner, c, createTable, formatBytes, noColor, sym, verdictBadge } from "./formatter.js";
+import {
+  type Attempt,
+  CACHE_DIR,
+  DEFAULT_PROVIDER_ORDER,
+  type ProviderId,
+  type ProviderStatus,
+  checkProviderHealth,
+  commandExists,
+  describeFailureKind,
+  probeProviders,
+  resolveProviderOrder,
+  resolveTimeoutMs,
+  runProvider,
+  writeDebugLog,
+} from "./providers.js";
 
 const program = new Command()
   .name("curl-review")
   .description("Safely inspect and optionally execute curl|sh install scripts")
-  .version("0.3.3")
+  .version("0.4.0")
+  // The program takes both a <url> argument and a `doctor` subcommand. Without
+  // this, commander binds options appearing after `doctor` to the root command,
+  // so `doctor --provider x` silently checked every provider instead.
+  .enablePositionalOptions();
+
+program
+  .command("doctor")
+  .description("Check that each reviewer CLI is installed, authenticated, and responding")
+  .option(
+    "-p, --provider <names>",
+    `Reviewer CLI(s) to check (default: ${DEFAULT_PROVIDER_ORDER.join(",")})`
+  )
+  .option("-d, --debug", "Print full reviewer output for failures")
+  .action(runDoctor);
+
+program
   .argument("<url>", "URL of the script to review")
   .option("-o, --original <command>", "Original intercepted command")
   .option("-e, --execute", "Non-interactive: review then execute")
   .option("-y, --yes", "Auto-execute only if verdict is SAFE")
+  .option(
+    "-r, --review",
+    "Non-interactive: review only, never execute (exit 0 SAFE, 1 DANGEROUS, 2 CAUTION, 3 no verdict)"
+  )
+  .option(
+    "-p, --provider <names>",
+    `Reviewer CLI(s) to try, in order (default: ${DEFAULT_PROVIDER_ORDER.join(",")})`
+  )
+  .option("-d, --debug", "Print full reviewer output on failure")
   .action(main);
+
+/**
+ * Round-trip each reviewer so the user can tell a working provider from one
+ * that merely looks configured. Exits 0 if any reviewer answered.
+ */
+async function runDoctor(opts: { provider?: string; debug?: boolean }) {
+  console.log(banner("0.4.0"));
+
+  const order = resolveProviderOrder(opts.provider);
+  // A health probe should not sit for the full review timeout per provider.
+  const timeoutMs = Math.min(resolveTimeoutMs(), 60_000);
+  const spinner = ora(`Checking ${order.length} reviewer(s)`).start();
+  const results = await checkProviderHealth(order, timeoutMs);
+  spinner.stop();
+
+  const failures: Attempt[] = [];
+  for (const { status, attempt } of results) {
+    if (!attempt) {
+      console.log(`  ${sym.cross} ${c.bold(status.label.padEnd(8))} ${c.dim("not installed")}`);
+      console.log(`  ${" ".repeat(11)}${sym.arrow} ${c.yellow(status.installHint)}`);
+      continue;
+    }
+    if (attempt.ok) {
+      console.log(
+        `  ${sym.check} ${c.bold(status.label.padEnd(8))} ${c.green("ok")} ${c.dim(`· ${(attempt.durationMs / 1000).toFixed(1)}s`)}`
+      );
+      continue;
+    }
+    failures.push(attempt);
+    console.log(
+      `  ${sym.cross} ${c.bold(status.label.padEnd(8))} ${c.dim(
+        `${describeFailureKind(attempt.kind)} · exit ${attempt.code} · ${(attempt.durationMs / 1000).toFixed(1)}s`
+      )}`
+    );
+    if (attempt.error) {
+      for (const line of wrap(attempt.error, 64)) console.log(`  ${" ".repeat(11)}${line}`);
+    }
+    if (attempt.hint) {
+      console.log(`  ${" ".repeat(11)}${sym.arrow} ${c.yellow(attempt.hint)}`);
+    }
+    // An authenticated-looking provider that fails a real request is exactly
+    // the case a status check misses, so call it out.
+    if (attempt.kind === "auth" && status.authed) {
+      console.log(
+        `  ${" ".repeat(11)}${c.dim("(reports itself as logged in — the stored token no longer works)")}`
+      );
+    }
+  }
+
+  const working = results.filter((r) => r.attempt?.ok).length;
+  blankLine();
+  const summary = `${working} of ${results.length} reviewer(s) working.`;
+  console.log(`  ${working > 0 ? c.green(summary) : c.danger(summary)}`);
+
+  if (failures.length) {
+    const logPath = writeDebugLog("doctor", failures);
+    if (logPath) console.log(`  ${c.dim(`Full output: ${logPath}`)}`);
+    if (opts.debug) {
+      for (const a of failures) {
+        blankLine();
+        console.log(`  ${c.dim(`── ${a.label} argv ──`)}`);
+        console.log(`  ${c.dim(formatArgv(a.provider, a.argv))}`);
+        console.log(`  ${c.dim(`── ${a.label} stdout ──`)}`);
+        console.log(a.stdout.trim() || c.dim("  (empty)"));
+        console.log(`  ${c.dim(`── ${a.label} stderr ──`)}`);
+        console.log(a.stderr.trim() || c.dim("  (empty)"));
+      }
+    }
+  }
+  blankLine();
+  process.exit(working > 0 ? 0 : 1);
+}
 
 interface ReviewState {
   url: string;
@@ -28,7 +139,9 @@ interface ReviewState {
   lines: number;
   bytes: number;
   sha256: string;
-  hasClaude: boolean;
+  providers: ProviderStatus[];
+  providerOrder: ProviderId[];
+  debug: boolean;
   hasBat: boolean;
   reviewed: boolean;
   cachedReview?: CachedReview;
@@ -41,11 +154,31 @@ interface CachedReview {
   verdict: "SAFE" | "CAUTION" | "DANGEROUS";
   output: string;
   timestamp: string;
+  provider?: string;
 }
 
-const CACHE_DIR = join(homedir(), ".cache", "curl-review");
-const AUTH_MSG = `Claude not authenticated. Run: ${c.bold("claude /login")}`;
 const blankLine = () => console.log("");
+
+/** Exit codes for the non-interactive modes; "no verdict" is always 3. */
+const VERDICT_EXIT: Record<"SAFE" | "CAUTION" | "DANGEROUS" | "NONE", number> = {
+  SAFE: 0,
+  DANGEROUS: 1,
+  CAUTION: 2,
+  NONE: 3,
+};
+
+/** True when at least one configured reviewer CLI is on PATH. */
+function anyProviderInstalled(statuses: ProviderStatus[]): boolean {
+  return statuses.some((s) => s.installed);
+}
+
+function noProviderMessage(statuses: ProviderStatus[]): string {
+  const lines = [`  ${c.warn("No reviewer CLI found.")} Install one of:`];
+  for (const s of statuses) {
+    lines.push(`    ${sym.bullet} ${c.bold(s.label)}  ${c.dim(s.installHint)}`);
+  }
+  return lines.join("\n");
+}
 
 function loadCachedReview(sha256: string): CachedReview | undefined {
   try {
@@ -73,9 +206,16 @@ function saveCachedReview(review: CachedReview): void {
 
 async function main(
   url: string,
-  opts: { original?: string; execute?: boolean; yes?: boolean }
+  opts: {
+    original?: string;
+    execute?: boolean;
+    yes?: boolean;
+    review?: boolean;
+    provider?: string;
+    debug?: boolean;
+  }
 ) {
-  console.log(banner("0.3.3"));
+  console.log(banner("0.4.0"));
 
   // Validate URL before doing anything
   try {
@@ -98,7 +238,9 @@ async function main(
   }
 
   const hasBat = commandExists("bat");
-  const hasClaude = checkClaude();
+  const providerOrder = resolveProviderOrder(opts.provider);
+  const providers = probeProviders(providerOrder);
+  const debug = opts.debug === true || process.env.CURL_REVIEW_DEBUG === "1";
 
   const spinner = ora(`Downloading ${c.dim(url)}`).start();
 
@@ -128,10 +270,7 @@ async function main(
     ["Size", `${lines} lines (${formatBytes(bytes)})`],
     ["SHA-256", c.dim(sha256)],
     ["Shebang", extractShebang(script) || c.dim("none")],
-    [
-      "Claude",
-      hasClaude ? "authenticated" : `unavailable ${c.dim("(run: claude /login)")}`,
-    ],
+    ["Reviewer", formatProviderStatus(providers)],
     [
       "Cached",
       cached
@@ -149,25 +288,45 @@ async function main(
     lines,
     bytes,
     sha256,
-    hasClaude,
+    providers,
+    providerOrder,
+    debug,
     hasBat,
     reviewed: false,
     cachedReview: cached,
   };
 
+  if (opts.review) {
+    // Review only: no prompts, no execution, verdict in the exit code. This is
+    // the mode for CI and for anywhere without a TTY, where the interactive
+    // menu would otherwise block forever.
+    await ensureReviewed(state);
+    process.exit(VERDICT_EXIT[state.verdict ?? "NONE"]);
+  }
+
   if (opts.execute) {
     await ensureReviewed(state);
+    if (!state.verdict) {
+      // No verdict means the review never ran. Executing here would defeat the
+      // point of the tool, so fail closed and let the user decide interactively.
+      console.log(`  ${c.danger("Refusing to execute without a verdict.")}\n`);
+      process.exit(3);
+    }
     if (state.verdict === "DANGEROUS") {
       console.log("\nScript flagged as DANGEROUS — aborting.");
       process.exit(1);
     }
-    console.log(`  ${c.dim("Verdict:")} ${verdictBadge(state.verdict!)} — proceeding to execute.\n`);
+    console.log(`  ${c.dim("Verdict:")} ${verdictBadge(state.verdict)} — proceeding to execute.\n`);
     executeScript(state);
     return;
   }
 
   if (opts.yes) {
     await ensureReviewed(state);
+    if (!state.verdict) {
+      console.log(`  ${c.danger("Refusing to auto-execute without a verdict.")}\n`);
+      process.exit(3);
+    }
     if (state.verdict === "SAFE") {
       console.log(`  ${c.dim("Verdict:")} ${verdictBadge("SAFE")} — auto-executing.\n`);
       executeScript(state);
@@ -203,23 +362,24 @@ async function interactiveMenu(state: ReviewState) {
       });
     }
 
-    if (state.hasClaude) {
+    if (anyProviderInstalled(state.providers)) {
+      const names = state.providers.filter((p) => p.installed).map((p) => p.label);
       let label = `${sym.shield} Security review`;
       if (state.reviewed) {
         label = `${sym.shield} Re-run security review`;
       } else if (state.cachedReview) {
-        label = `${sym.shield} Fresh review with Claude`;
+        label = `${sym.shield} Fresh review with ${names[0]}`;
       }
       choices.push({
         value: "review",
         name: label,
-        description: "Analyze with Claude",
+        description: `Analyze with ${names.join(" → ")}`,
       });
     } else if (!state.cachedReview) {
       choices.push({
         value: "review_disabled",
         name: c.dim(`${sym.shield} Security review (unavailable)`),
-        description: "Run: claude /login",
+        description: "No reviewer CLI installed",
       });
     }
 
@@ -277,9 +437,9 @@ async function interactiveMenu(state: ReviewState) {
           await runSecurityReview(state);
           break;
         case "review_disabled":
-          console.log(
-            `\n${AUTH_MSG}\n`
-          );
+          blankLine();
+          console.log(noProviderMessage(state.providers));
+          blankLine();
           break;
         case "execute":
           executeScript(state);
@@ -339,29 +499,98 @@ function viewScript(state: ReviewState) {
   blankLine();
 }
 
-function runClaude(prompt: string, input: string): Promise<{ stdout: string; stderr: string; code: number }> {
-  return new Promise((resolve) => {
-    const child = nodeSpawn("claude", ["-p", prompt], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const chunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
-
-    child.stdout.on("data", (d: Buffer) => chunks.push(d));
-    child.stderr.on("data", (d: Buffer) => errChunks.push(d));
-
-    child.on("close", (code) => {
-      resolve({
-        stdout: Buffer.concat(chunks).toString("utf-8"),
-        stderr: Buffer.concat(errChunks).toString("utf-8"),
-        code: code ?? 1,
-      });
-    });
-
-    child.stdin.write(input);
-    child.stdin.end();
+function formatProviderStatus(statuses: ProviderStatus[]): string {
+  const parts = statuses.map((s) => {
+    if (!s.installed) return c.dim(`${s.label} (not installed)`);
+    if (s.authed === false) return `${s.label} ${c.yellow("(logged out)")}`;
+    return c.green(s.label);
   });
+  return parts.join(c.dim(" → "));
+}
+
+/**
+ * Render every failed attempt with its reason and fix.
+ *
+ * Agent CLIs report request failures on stdout, not stderr, and often exit
+ * non-zero with an empty stderr — so surfacing stderr alone leaves the user
+ * with nothing to act on.
+ */
+function renderFailure(state: ReviewState, attempts: Attempt[]): void {
+  const rule = c.red("─".repeat(56));
+  blankLine();
+  console.log(`  ${c.danger("✗  Security review failed")}`);
+  console.log(`  ${rule}`);
+
+  for (const a of attempts) {
+    const meta: string[] = [describeFailureKind(a.kind)];
+    if (a.code !== null) meta.push(`exit ${a.code}`);
+    if (a.durationMs > 0) meta.push(`${(a.durationMs / 1000).toFixed(1)}s`);
+    console.log(`  ${c.bold(a.label.padEnd(8))} ${c.dim(meta.join(" · "))}`);
+    if (a.error) {
+      for (const line of wrap(a.error, 66)) {
+        console.log(`  ${" ".repeat(9)}${line}`);
+      }
+    }
+    if (a.hint) {
+      console.log(`  ${" ".repeat(9)}${sym.arrow} ${c.yellow(a.hint)}`);
+    }
+  }
+
+  // Configured providers that were never tried, so the list of what was and
+  // wasn't attempted is complete.
+  for (const s of state.providers) {
+    if (s.installed || attempts.some((a) => a.provider === s.id)) continue;
+    console.log(`  ${c.bold(s.label.padEnd(8))} ${c.dim("not installed")}`);
+    console.log(`  ${" ".repeat(9)}${sym.arrow} ${c.yellow(s.installHint)}`);
+  }
+
+  console.log(`  ${rule}`);
+
+  const logPath = writeDebugLog(state.url, attempts);
+  if (logPath) {
+    console.log(`  ${c.dim(`Full output: ${logPath}`)}`);
+  }
+  if (!state.debug) {
+    console.log(`  ${c.dim("Re-run with --debug to print it inline.")}`);
+  } else {
+    for (const a of attempts) {
+      blankLine();
+      console.log(`  ${c.dim(`── ${a.label} argv ──`)}`);
+      console.log(`  ${c.dim(formatArgv(a.provider, a.argv))}`);
+      console.log(`  ${c.dim(`── ${a.label} stdout ──`)}`);
+      console.log(a.stdout.trim() || c.dim("  (empty)"));
+      console.log(`  ${c.dim(`── ${a.label} stderr ──`)}`);
+      console.log(a.stderr.trim() || c.dim("  (empty)"));
+    }
+  }
+  blankLine();
+}
+
+/** argv for display: the review prompt is ~2 KB and would bury everything else. */
+export function formatArgv(bin: string, argv: string[], maxArg = 60): string {
+  return [bin, ...argv]
+    .map((arg) =>
+      arg.length > maxArg
+        ? `${JSON.stringify(arg.slice(0, maxArg))}…+${arg.length - maxArg}ch`
+        : JSON.stringify(arg)
+    )
+    .join(" ");
+}
+
+function wrap(text: string, width: number): string[] {
+  const words = text.replace(/\s+/g, " ").trim().split(" ");
+  const lines: string[] = [];
+  let current = "";
+  for (const word of words) {
+    if (current && current.length + 1 + word.length > width) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = current ? `${current} ${word}` : word;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
 }
 
 function restoreCachedReview(state: ReviewState): void {
@@ -379,16 +608,101 @@ async function ensureReviewed(state: ReviewState): Promise<void> {
 }
 
 async function runSecurityReview(state: ReviewState) {
-  if (!state.hasClaude) {
-    console.log(`\n${AUTH_MSG}\n`);
+  if (!anyProviderInstalled(state.providers)) {
+    blankLine();
+    console.log(noProviderMessage(state.providers));
+    blankLine();
     return;
   }
 
   blankLine();
   const domain = new URL(state.url).hostname;
-  const spinner = ora(`Analyzing ${state.lines} lines from ${c.dim(domain)}`).start();
 
-  const prompt = `You are a shell script security reviewer. Analyze this script downloaded from: ${state.url}
+  const prompt = buildReviewPrompt(state.url, domain);
+  const timeoutMs = resolveTimeoutMs();
+  const candidates = state.providerOrder.filter(
+    (id) => state.providers.find((p) => p.id === id)?.installed
+  );
+
+  const attempts: Attempt[] = [];
+  let success: Attempt | undefined;
+
+  for (const id of candidates) {
+    const label = state.providers.find((p) => p.id === id)!.label;
+    const spinner = ora(
+      `Analyzing ${state.lines} lines from ${c.dim(domain)} ${c.dim(`(${label})`)}`
+    ).start();
+
+    const attempt = await runProvider(id, prompt, state.script, timeoutMs);
+    attempts.push(attempt);
+
+    if (attempt.ok) {
+      spinner.stop();
+      success = attempt;
+      break;
+    }
+
+    // Keep the spinner line as a record of what was tried before falling back.
+    spinner.fail(
+      `${label}: ${describeFailureKind(attempt.kind)}${
+        candidates.indexOf(id) < candidates.length - 1 ? c.dim(" — trying next reviewer") : ""
+      }`
+    );
+  }
+
+  if (!success) {
+    renderFailure(state, attempts);
+    return;
+  }
+
+  finishReview(state, success, attempts);
+}
+
+function finishReview(state: ReviewState, success: Attempt, attempts: Attempt[]) {
+  const output = success.text.trim();
+  state.reviewed = true;
+
+  const verdict = parseVerdict(output);
+  const via = c.dim(` (via ${success.label})`);
+  if (verdict) {
+    state.verdict = verdict;
+    const mark =
+      verdict === "DANGEROUS" ? sym.cross : verdict === "CAUTION" ? sym.warn : sym.check;
+    console.log(`${mark} Verdict: ${verdictBadge(verdict)}${via}`);
+  } else {
+    console.log(`${sym.info} Review complete${via}`);
+  }
+
+  if (attempts.length > 1) {
+    const failed = attempts.slice(0, -1).map((a) => `${a.label} (${describeFailureKind(a.kind)})`);
+    console.log(`  ${c.dim(`Fell back after: ${failed.join(", ")}`)}`);
+    const logPath = writeDebugLog(state.url, attempts.slice(0, -1));
+    if (logPath) console.log(`  ${c.dim(`Details: ${logPath}`)}`);
+  }
+
+  // Cache the review if we got a verdict
+  if (state.verdict) {
+    const cached: CachedReview = {
+      sha256: state.sha256,
+      url: state.url,
+      verdict: state.verdict,
+      output,
+      timestamp: new Date().toISOString().split("T")[0],
+      provider: success.provider,
+    };
+    saveCachedReview(cached);
+    state.cachedReview = cached;
+  }
+
+  if (output) {
+    blankLine();
+    console.log(renderMarkdown(output));
+  }
+  blankLine();
+}
+
+function buildReviewPrompt(url: string, domain: string): string {
+  return `You are a shell script security reviewer. Analyze this script downloaded from: ${url}
 
 First, assess the source: What is "${domain}" known for? Is it a well-known, reputable source for developer tools? Factor this into your verdict.
 
@@ -423,46 +737,9 @@ One sentence on what ${domain} is and its reputation.
 - Skip this section entirely if nothing notable
 
 ## Verdict
-Write exactly one of: SAFE, CAUTION, or DANGEROUS (the word alone, not bold, not in asterisks) followed by a dash and one-line recommendation.`;
+Write exactly one of: SAFE, CAUTION, or DANGEROUS (the word alone, not bold, not in asterisks) followed by a dash and one-line recommendation.
 
-  const result = await runClaude(prompt, state.script);
-
-  if (result.code !== 0) {
-    const stderr = result.stderr.trim();
-    spinner.fail(`Security review failed${stderr ? `: ${stderr}` : ""}`);
-    return;
-  }
-
-  const output = result.stdout.trim();
-  state.reviewed = true;
-
-  const verdict = parseVerdict(output);
-  if (verdict) {
-    state.verdict = verdict;
-    const method = verdict === "DANGEROUS" ? "fail" : verdict === "CAUTION" ? "warn" : "succeed";
-    spinner[method](`Verdict: ${verdictBadge(verdict)}`);
-  } else {
-    spinner.info("Review complete");
-  }
-
-  // Cache the review if we got a verdict
-  if (state.verdict) {
-    const cached: CachedReview = {
-      sha256: state.sha256,
-      url: state.url,
-      verdict: state.verdict,
-      output,
-      timestamp: new Date().toISOString().split("T")[0],
-    };
-    saveCachedReview(cached);
-    state.cachedReview = cached;
-  }
-
-  if (output) {
-    blankLine();
-    console.log(renderMarkdown(output));
-  }
-  blankLine();
+The script follows.`;
 }
 
 function executeScript(state: ReviewState) {
@@ -521,28 +798,6 @@ export function parseVerdict(output: string): Verdict | null {
   if (/^CAUTION\b/i.test(verdictLine)) return "CAUTION";
   if (/^SAFE\b/i.test(verdictLine)) return "SAFE";
   return null;
-}
-
-function commandExists(cmd: string): boolean {
-  try {
-    execFileSync("which", [cmd], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function checkClaude(): boolean {
-  if (!commandExists("claude")) return false;
-  try {
-    const out = execFileSync("claude", ["auth", "status"], {
-      encoding: "utf-8",
-      timeout: 5000,
-    });
-    return out.includes('"loggedIn": true');
-  } catch {
-    return false;
-  }
 }
 
 // Only parse CLI args when run directly, not when imported as a module

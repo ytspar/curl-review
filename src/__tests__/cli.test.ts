@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
-import { resolve, dirname } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractShebang, parseVerdict } from "../cli.js";
 
@@ -12,7 +14,44 @@ describe("CLI", () => {
     const output = execFileSync("node", [cliPath, "--version"], {
       encoding: "utf-8",
     });
-    expect(output.trim()).toBe("0.3.3");
+    expect(output.trim()).toBe("0.4.0");
+  });
+
+  it("lists the doctor subcommand and non-interactive flags in help", () => {
+    const output = execFileSync("node", [cliPath, "--help"], { encoding: "utf-8" });
+    expect(output).toContain("doctor");
+    expect(output).toContain("-r, --review");
+  });
+
+  // Run doctor with an empty PATH so no provider binary is found: every
+  // reviewer reports "not installed" and nothing is ever spawned, which keeps
+  // these deterministic and fast regardless of what is installed locally.
+  function doctorWithNoProviders(args: string[]): string {
+    const emptyDir = mkdtempSync(join(tmpdir(), "curl-review-nopath-"));
+    try {
+      execFileSync(process.execPath, [cliPath, "doctor", ...args], {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, PATH: emptyDir, NO_COLOR: "1" },
+      });
+      throw new Error("doctor should exit non-zero when no reviewer works");
+    } catch (err: any) {
+      // Exit 1 is the expected "nothing works" outcome.
+      expect(err.status).toBe(1);
+      return err.stdout.toString();
+    } finally {
+      rmSync(emptyDir, { recursive: true, force: true });
+    }
+  }
+
+  it("checks every reviewer by default", () => {
+    expect(doctorWithNoProviders([])).toContain("0 of 3 reviewer(s)");
+  });
+
+  it("routes options after `doctor` to the subcommand, not the root", () => {
+    // Regression: without enablePositionalOptions, commander bound --provider
+    // to the root command, so doctor silently checked all three anyway.
+    expect(doctorWithNoProviders(["--provider", "kimi"])).toContain("0 of 1 reviewer(s)");
   });
 
   it("prints help with --help flag", () => {

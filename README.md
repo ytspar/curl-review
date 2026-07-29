@@ -2,7 +2,7 @@
 
 Safely inspect and optionally execute `curl | sh` install scripts.
 
-Instead of blindly piping a URL to your shell, `curl-review` downloads the script, lets you view it with syntax highlighting, and optionally runs an AI security review via [Claude Code](https://claude.ai/claude-code) before execution.
+Instead of blindly piping a URL to your shell, `curl-review` downloads the script, lets you view it with syntax highlighting, and optionally runs an AI security review before execution.
 
 ## Install
 
@@ -81,11 +81,109 @@ With the original intercepted command (shown in the banner for context):
 curl-review https://example.com/install.sh --original "curl -fsSL https://example.com/install.sh | sh"
 ```
 
-Non-interactive mode (review then execute):
+### Non-interactive modes
+
+The default interactive menu needs a TTY. For CI, scripts, or anywhere without
+one, use a flag that decides on its own:
 
 ```bash
-curl-review https://example.com/install.sh --execute
+curl-review <url> --review    # review only, never execute — verdict in exit code
+curl-review <url> --execute   # review, then execute unless DANGEROUS
+curl-review <url> --yes       # execute only if SAFE
 ```
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | SAFE (or, for `--execute`/`--yes`, the script ran and succeeded) |
+| `1` | DANGEROUS — never executed |
+| `2` | CAUTION (`--review`), or verdict not SAFE (`--yes`) |
+| `3` | No verdict — every reviewer failed |
+
+All three fail closed: if no reviewer produces a verdict, the script is **not** run.
+
+## Reviewers
+
+The security review runs through a locally installed agent CLI. They are tried in
+order until one answers, so a logged-out or rate-limited primary doesn't block the
+review:
+
+| Order | CLI | Install | Authenticate |
+| --- | --- | --- | --- |
+| 1 | [`claude`](https://claude.ai/claude-code) | `npm i -g @anthropic-ai/claude-code` | `claude /login` |
+| 2 | [`codex`](https://github.com/openai/codex) | `npm i -g @openai/codex` | `codex login` |
+| 3 | [`kimi`](https://moonshotai.github.io/kimi-code/) | `npm i -g @moonshot-ai/kimi-code` | `kimi login` |
+
+Each reviewer runs sandboxed and without project context — the script under review
+is untrusted input, so the agent gets no tools it could be talked into using, and
+no CLAUDE.md/MCP/hook configuration from the directory you happen to be in.
+
+Claude and Codex stream the script over stdin. Kimi's prompt mode ignores stdin, so
+the script travels in the prompt argument, which caps it at 120 KB; larger scripts
+report `script too large` for Kimi rather than being silently truncated and reviewed
+in part.
+
+Choose or reorder reviewers:
+
+```bash
+curl-review <url> --provider codex          # only codex
+curl-review <url> --provider codex,claude   # codex first, claude as backup
+export CURL_REVIEW_PROVIDERS=codex,claude   # same, persistently
+```
+
+### Checking your reviewers
+
+`claude auth status` reports a live session even when the stored token can no
+longer be refreshed, so a reviewer can look configured and still fail every
+request. `doctor` sends each one a real one-word prompt and reports what
+actually works:
+
+```bash
+curl-review doctor                    # check all reviewers
+curl-review doctor --provider kimi    # check one
+```
+
+```
+  ✓ Claude   ok · 4.4s
+  ✓ Codex    ok · 9.9s
+  ✓ Kimi     ok · 7.1s
+
+  3 of 3 reviewer(s) working.
+```
+
+Exits `0` if at least one reviewer answered, `1` if none did.
+
+### When a review fails
+
+Every failure names the reviewer, the reason, and the fix:
+
+```
+  ✗  Security review failed
+  ────────────────────────────────────────────────────────
+  Claude   authentication · exit 1 · 1.6s
+           Failed to authenticate: OAuth session expired and could not be
+           refreshed (HTTP 401)
+           → claude /login
+  Codex    usage limit · exit 1 · 4.2s
+           stream error: exceeded retry limit, last status: 429
+           → wait for the limit to reset, or try another provider
+  Kimi     not installed
+           → uv tool install kimi-cli
+  ────────────────────────────────────────────────────────
+  Full output: ~/.cache/curl-review/last-error.log
+```
+
+Full stdout/stderr of every attempt is always written to
+`~/.cache/curl-review/last-error.log`. Add `--debug` (or `CURL_REVIEW_DEBUG=1`) to
+print it inline instead.
+
+### Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `CURL_REVIEW_PROVIDERS` | Comma-separated reviewer order (default `claude,codex,kimi`) |
+| `CURL_REVIEW_TIMEOUT` | Per-reviewer timeout in seconds (default `180`) |
+| `CURL_REVIEW_DEBUG` | Set to `1` to always print full reviewer output on failure |
+| `CURL_REVIEW_BYPASS` | Set to `1` to skip the PATH shim |
 
 ## Interactive Menu
 
@@ -97,7 +195,7 @@ After downloading, you get an interactive menu:
 │
 │  URL          https://example.com/install.sh
 │  Size         264 lines (12.4KB)
-│  Claude       ✓ ready
+│  Reviewer     Claude → Codex → Kimi (not installed)
 └──────────────────────────────────────────────────────────┘
 
 ? What would you like to do?
@@ -108,7 +206,7 @@ After downloading, you get an interactive menu:
 ```
 
 - **View script** — syntax-highlighted via `bat` (falls back to `less`)
-- **Security review** — sends the script to Claude for analysis of malicious patterns, privilege escalation, obfuscated code, and unexpected network calls
+- **Security review** — sends the script to the first available reviewer for analysis of malicious patterns, privilege escalation, obfuscated code, and unexpected network calls
 - **Execute** — runs the script; prompts for confirmation if unreviewed or flagged dangerous
 - **Cancel** — exit without running
 
@@ -121,8 +219,8 @@ After a security review, the verdict updates the menu:
 ## Optional Dependencies
 
 - [`bat`](https://github.com/sharkdp/bat) — syntax highlighting (falls back to `less`)
-- [`glow`](https://github.com/charmbracelet/glow) — terminal markdown rendering for security review output (falls back to basic ANSI formatting)
-- [`claude`](https://claude.ai/claude-code) — AI security review (run `claude /login` to authenticate)
+- At least one reviewer CLI — see [Reviewers](#reviewers). Without one, viewing and
+  executing still work; only the security review is unavailable.
 
 ## License
 
