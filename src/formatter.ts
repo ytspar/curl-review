@@ -87,6 +87,10 @@ export function createTable(
     style: {
       "padding-left": 1,
       "padding-right": 1,
+      // cli-table3 colours borders grey and headers red by default, applied
+      // internally rather than through colorize() — so NO_COLOR has to be
+      // honoured here too or the table stays coloured when nothing else is.
+      ...(noColor ? { border: [], head: [] } : {}),
     },
   };
 

@@ -28,7 +28,7 @@ import {
 const program = new Command()
   .name("curl-review")
   .description("Safely inspect and optionally execute curl|sh install scripts")
-  .version("0.4.1")
+  .version("0.4.2")
   // The program takes both a <url> argument and a `doctor` subcommand. Without
   // this, commander binds options appearing after `doctor` to the root command,
   // so `doctor --provider x` silently checked every provider instead.
@@ -65,7 +65,7 @@ program
  * that merely looks configured. Exits 0 if any reviewer answered.
  */
 async function runDoctor(opts: { provider?: string; debug?: boolean }) {
-  console.log(banner("0.4.1"));
+  console.log(banner("0.4.2"));
 
   const order = resolveProviderOrder(opts.provider);
   // A health probe shouldn't sit for the full review timeout, but the cap still
@@ -218,7 +218,7 @@ async function main(
     debug?: boolean;
   }
 ) {
-  console.log(banner("0.4.1"));
+  console.log(banner("0.4.2"));
 
   // Validate URL before doing anything
   try {

@@ -14,7 +14,7 @@ describe("CLI", () => {
     const output = execFileSync("node", [cliPath, "--version"], {
       encoding: "utf-8",
     });
-    expect(output.trim()).toBe("0.4.1");
+    expect(output.trim()).toBe("0.4.2");
   });
 
   it("lists the doctor subcommand and non-interactive flags in help", () => {

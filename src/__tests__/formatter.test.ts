@@ -1,5 +1,43 @@
 import { describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { formatBytes, colorize, verdictBadge, banner, createTable, noColor, c, sym } from "../formatter.js";
+
+const distDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../dist");
+const ANSI = /\x1b\[/;
+
+describe("NO_COLOR", () => {
+  // `noColor` is captured at module load, so each direction needs its own
+  // process. Regression: cli-table3 colours its borders and header internally,
+  // where colorize() never reaches — the table stayed coloured under NO_COLOR
+  // while every other element went plain.
+  function renderTableWith(env: NodeJS.ProcessEnv): string {
+    const formatterUrl = pathToFileURL(resolve(distDir, "formatter.js")).href;
+    return execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `const m = await import(${JSON.stringify(formatterUrl)});
+         const t = m.createTable(["Head"]);
+         t.push(["cell"]);
+         process.stdout.write(t.toString());`,
+      ],
+      { encoding: "utf-8", env }
+    );
+  }
+
+  const { NO_COLOR: _drop, ...envWithoutNoColor } = process.env;
+
+  it("renders tables without ANSI escapes when NO_COLOR is set", () => {
+    expect(ANSI.test(renderTableWith({ ...envWithoutNoColor, NO_COLOR: "1" }))).toBe(false);
+  });
+
+  it("still colours tables when NO_COLOR is unset", () => {
+    expect(ANSI.test(renderTableWith(envWithoutNoColor))).toBe(true);
+  });
+});
 
 describe("formatBytes", () => {
   it("returns 0 B for zero", () => {

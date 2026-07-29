@@ -1,0 +1,132 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialise main (a release may be in flight); collapse superseded PR pushes.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Runs for every push and PR, unconditionally. Gating verification on
+  # "is this version new?" meant unbumped commits were never built or tested,
+  # and a bumped one hit its first-ever CI run at the moment of release.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Not --if-present: dist/ is gitignored and package.json `files` ships
+      # only dist, so a build that silently no-ops would publish an empty package.
+      - name: Build
+        run: npm run build
+
+      - name: Check the build produced an entrypoint
+        run: |
+          test -s dist/cli.js || { echo "::error::dist/cli.js missing or empty after build"; exit 1; }
+
+      - name: Test
+        run: npm test
+
+  publish:
+    needs: verify
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the release tag
+      id-token: write # npm trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Decide whether this version needs publishing
+        id: version
+        run: |
+          set -euo pipefail
+          NAME=$(node -p "require('./package.json').name")
+          LOCAL=$(node -p "require('./package.json').version")
+          if [[ ! "$NAME" =~ ^(@[a-z0-9~-][a-z0-9._~-]*/)?[a-z0-9~-][a-z0-9._~-]*$ ]]; then
+            echo "::error::package.json name has an unexpected shape; refusing to proceed."
+            exit 1
+          fi
+          if [[ ! "$LOCAL" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::package.json version is not a plain semver; refusing to proceed."
+            exit 1
+          fi
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "version=${LOCAL}" >> "$GITHUB_OUTPUT"
+
+          # Treat only a genuine 404 as "not published". A network or auth blip
+          # must not be read as "absent" (publish attempt fails at the worst
+          # moment) or, worse, be indistinguishable from "present" and skip a
+          # real release silently.
+          set +e
+          OUT=$(npm view "${NAME}@${LOCAL}" version 2>&1)
+          CODE=$?
+          set -e
+          if [ "$CODE" -eq 0 ]; then
+            echo "::notice::${NAME}@${LOCAL} is already on the registry - nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          elif grep -qE 'E404|404 Not Found|is not in this registry|No match found' <<<"$OUT"; then
+            echo "::notice::${NAME}@${LOCAL} is not on the registry - publishing."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::could not determine whether ${NAME}@${LOCAL} is published:"
+            echo "$OUT"
+            exit 1
+          fi
+
+      # Trusted publishing needs npm >= 11.5.1; Node 22 bundles npm 10.
+      # Pinned to the major so a future npm 12 cannot change publish behaviour
+      # underneath us without a deliberate bump here.
+      - name: Upgrade npm for Trusted Publishing
+        if: steps.version.outputs.publish == 'true'
+        run: |
+          npm install -g 'npm@^11.5.1'
+          echo "npm $(npm --version), node $(node --version)"
+
+      - name: Install
+        if: steps.version.outputs.publish == 'true'
+        run: npm ci
+
+      # `prepublishOnly` runs typecheck + build, so dist/ is produced here.
+      - name: Publish
+        if: steps.version.outputs.publish == 'true'
+        run: npm publish --provenance --access public
+
+      # Without this, "did that commit actually ship?" is unanswerable from the
+      # repo — three runs reported success while publishing nothing.
+      - name: Tag the released version
+        if: steps.version.outputs.publish == 'true'
+        env:
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "$TAG"
